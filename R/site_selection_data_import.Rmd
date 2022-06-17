@@ -1,0 +1,394 @@
+---
+title: "amerifluxr demo"
+author: "Housen Chu"
+output: rmarkdown::html_document
+---
+
+```{r setup, warning = FALSE}
+library(amerifluxr)
+library(data.table)
+library(pander)
+```
+
+amerifluxr is a programmatic interface to [AmeriFlux](https://ameriflux.lbl.gov/). 
+This vignette demonstrates examples to query a list of target sites based on 
+sites' general information and availability of metadata and data, and then 
+download, import, and parse the data and metadata.     
+
+## Get a site list with general info
+
+AmeriFlux data are organized by individual sites. Typically, data query begins 
+with site search and selection. A full list of AmeriFlux sites with general info 
+can be obtained using the amf_site_info() function. 
+
+Convert the site list to a data.table for easier manipulation. Also see 
+[link](https://ameriflux.lbl.gov/data/badm/badm-standards/) for variable 
+definition. 
+
+```{r echo=TRUE, results = "asis"}
+# get a full list of sites with general info
+sites <- amf_site_info()
+sites_dt <- data.table::as.data.table(sites)
+
+#pander::pandoc.table(sites_dt[c(1:3), ])
+
+```
+
+The site list provides a summary of all registered sites and sites with data.
+
+It's often important to understand the data use policy under which the data are 
+shared. In 2021, the AmeriFlux community moved to CC-BY-4.0 License. Most site 
+PIs now share their data under the CC-BY-4.0 license. Data for some sites are 
+shared under the historical AmeriFlux data-sharing policy, now called the 
+AmeriFlux Legacy Data Policy. 
+
+Check [link](https://ameriflux.lbl.gov/data/data-policy/#data-use) for data use 
+policy and attribution guidelines.
+
+```{r results = "asis"}
+# total number of registered sites
+pander::pandoc.table(sites_dt[, .N])
+
+# total number of sites with available data
+pander::pandoc.table(sites_dt[!is.na(DATA_START), .N])
+
+# get number of sites with available data, grouped by data use policy
+pander::pandoc.table(sites_dt[!is.na(DATA_START), .N, by = .(DATA_POLICY)])
+
+```
+
+Once decided, we can query a target site list based on the desired criteria, 
+e.g., IGBP, data availability, data policy. 
+
+```{r results = "asis"}
+# get a list of cropland and grassland sites with available data,
+#  shared under CC-BY-4.0 data policy, data available in 2017-
+crop_ls <- sites_dt[IGBP %in% c("CRO", "GRA", "CVM") &
+                      !is.na(DATA_START) & DATA_START <= 2021 & DATA_END >= 2017 &
+                      DATA_POLICY == "CCBY4.0", ]
+
+#pander::pandoc.table(crop_ls[c(1:10),])
+
+```
+
+## Get metadata availability
+
+Next, we want to know if certain types of metadata are available for the 
+selected sites. The amf_list_metadata() function provides a summary of metadata 
+availability before actually downloading the data and metadata. It returns the 
+number of entries of each BADM variable/group for each site. The site_set 
+parameter of amf_list_data() can be used to subset the sites of interest. 
+
+Check [AmeriFlux webpage](https://ameriflux.lbl.gov/data/badm/badm-basics/)
+for definitions of all BADM groups.     
+
+```{r results = "asis"}
+# retrieve the metadata availability for selected sites
+metadata_aval_sub <- as.data.table(amf_list_metadata(site_set = crop_ls$SITE_ID))
+
+# down-select sites by availability of canopy height (GRP_HEIGHTC)
+crop_ls2 <- metadata_aval_sub[GRP_HEIGHTC > 0, .(SITE_ID, GRP_HEIGHTC)][order(-GRP_HEIGHTC)]
+
+pander::pandoc.table(crop_ls2)
+```
+
+## Get data availability
+
+Next, we can use amf_list_data() to query the availability of specific variables
+in the data (i.e., flux/met data, so-called BASE data product).
+
+The amf_list_data() provides a summary of variable availability (per site/year)
+before downloading the data. The site_set parameter of amf_list_data() can be 
+used to subset the sites of interest. 
+
+```{r results = "asis"}
+# get data availability for selected sites
+data_aval <- data.table::as.data.table(amf_list_data(site_set = crop_ls2$SITE_ID))
+
+#pander::pandoc.table(data_aval[c(1:10), ])
+```
+
+We can use the variable availability to subset sites that have certain variables
+in specific years. 
+
+The BASENAME column indicates the variable's base name (i.e., ignoring position 
+qualifier), and can be used to get a coarse-level variable availability. 
+
+See [AmeriFlux website](https://ameriflux.lbl.gov/data/aboutdata/data-variables/)
+for definitions of base names and qualifiers.
+
+```{r results = "asis"}
+# down-select sites based on the available target variables in 2017-2021
+data_aval_sub <- data_aval[data_aval$BASENAME %in% c("LE", "TA", "RH", "LW_OUT") &
+                             !data_aval$GAP_FILLED,
+                           .(SITE_ID, VARIABLE, BASENAME, 
+                             Y2017, Y2018, Y2019, Y2020, Y2021,
+                             Y2017_2021 = (Y2017 + Y2018 + Y2019 + Y2020 + Y2021) / 5)]
+
+crop_ls3 <- data_aval_sub[data_aval_sub$Y2017_2021 > 0, ]
+
+#pander::pandoc.table(table(crop_ls3$SITE_ID, crop_ls3$BASENAME))
+
+```
+
+A companion function amf_plot_datayear() can be used for visualizing the data 
+availability in an interactive figure. However, it is strongly advised to subset
+the sites, variables, and/or years for faster processing and better visualization.
+
+```{r}
+# plot data availability of LE for selected sites in 2017-2021
+#  use unique() to remove redundant SITE_ID in cropl_ls3 
+amf_plot_datayear(
+  site_set = unique(crop_ls3$SITE_ID),
+  var_set = c("LE"),
+  nonfilled_only = TRUE,
+  year_set = c(2017:2021)
+)
+
+```
+
+## Download data
+
+AmeriFlux data and metadata can be downloaded using amf_download_base() and 
+amf_download_bif(). Users will need to create a personal AmeriFlux account 
+[here](https://ameriflux-data.lbl.gov/Pages/RequestAccount.aspx) before download. 
+
+The following downloads AmeriFlux flux/met data (aka BASE data product) from 
+multiple sites.
+
+```{r eval = FALSE}
+## finalize the list of sites to download
+final_list <- unique(crop_ls3$SITE_ID)
+final_list <- final_list[-which(final_list == "US-Twt")]
+  
+## When running, replace user_id and user_email with a real AmeriFlux account
+floc2 <- amf_download_base(
+  user_id = Sys.getenv("MY_USER"),  ## replace with your user ID
+  user_email = Sys.getenv("MY_EMAIL"), ## replace with your email
+  site_id = final_list,
+  data_product = "BASE-BADM",
+  data_policy = "CCBY4.0",
+  agree_policy = TRUE,
+  intended_use = "other",
+  intended_use_text = "amerifluxr package demonstration",
+  verbose = TRUE,
+  out_dir = tempdir()
+)
+
+print(floc2)
+```
+
+The downloaded files are zipped files by individual sites saved in tempdir()
+(e.g., AMF\_\{SITE_ID\}\_BASE-BADM\_\{VERSION\}\.zip), which contains a BASE 
+data file and a metadata file (aka BADM data product. The amf_download_base() 
+also returns the file path to the downloaded file, which can be used later to 
+read the file into R.
+
+# BASE data product
+## Import data
+
+The amd_read_base() imports a BASE file, either from a zipped file
+or an unzipped comma-separated file (.csv). The parse_timestamp 
+parameter can be used if additional time-keeping columns (e.g., 
+year, month, day, hour) are desired. 
+
+```{r results = "asis"}
+# read the BASE from a zip file, without additional parsed time-keeping columns
+base1 <- amf_read_base(
+  file = floc2[1],
+  unzip = TRUE,
+  parse_timestamp = TRUE
+)
+
+plot(base1$TIMESTAMP, 
+     base1$LE_1_1_1,
+     pch = 16,
+     cex = 0.5,
+     col = rgb(0, 0, 0, 0.1))
+
+```
+
+## Parse and interpret data
+
+The details of the BASE data product's format and variable definitions are on 
+[AmeriFlux website](https://ameriflux.lbl.gov/data/aboutdata/data-variables/).
+
+In short, the BASE data product contains flux, meteorological, and soil 
+observations that are reported at regular intervals of time, generally 
+half-hourly or hourly, for a certain time period. **TIMESTAMP_START**
+and **TIMESTAMP_END** columns (i.e., YYYYMMDDHHMM 12 digits) denote the starting 
+and ending time of each reporting interval (i.e., row). 
+
+All other variables use the format of \{base name\}\_\{qualifier\}, e.g., FC_1, 
+CO2_1_1_1. Base names indicate fundamental quantities that are either measured 
+or calculated / derived. Qualifiers are suffixes appended to variable base names
+that provide additional information (e.g., gap-filling, position) about the 
+variable. In some cases, qualifiers are omitted if only one variable is provided
+for a site.
+
+The amf_variable() retrieves the latest list of base names and default units. 
+For sites that have relatively fewer variables and less complicated qualifiers, 
+the users could easily interpret variables and qualifiers. 
+
+```{r results = "asis"}
+# get a list of latest base names and units. 
+FP_ls <- amf_variables()
+
+#pander::pandoc.table(FP_ls[c(11:20), ])
+```
+
+Alternatively, the amf_parse_basename() can programmatically parse the the 
+variable names into base names and qualifiers.
+
+This function can be helpful for sites with many variables and relatively 
+complicated qualifiers, as a prerequisite for handling data from many sites. 
+The function returns a data frame with information about each variable's base 
+name, qualifier, and whether a variable is gap-filled, layer-aggregated, or 
+replicate aggregated.
+
+```{r results = "asis"}
+# parse the variable name
+basename_decode <- amf_parse_basename(var_name = colnames(base1))
+
+#pander::pandoc.table(basename_decode[c(1, 2, 3, 4, 6, 11, 12),])
+```
+
+## Data filtering
+
+While BASE data products are quality-checked before release, the data may not be 
+filtered for all outliers. The amf_filter_base() can be use to filter the data 
+based on the expected physically ranges (i.e., obtained through amf_variables()). 
+
+By default, a ±5% buffer is applied to account for possible edge values near 
+the lower and upper bounds, which are commonly observed for certain variables
+like radiation, relative humidity, and snow depth. 
+
+```{r }
+# filter data, using default physical range +/- 5% buffer
+base_f <- amf_filter_base(data_in = base1)
+
+```
+
+## Measurement height information
+
+Measurement height information contains height/depth and instrument model 
+information of the BASE data products. The info can be downloaded directly using
+the amf_var_info() function. The function returns a data frame for all available 
+sites, and can be subset using the "Site_ID" column. The "Height" column refers
+to the distance from the ground surface in meters. Positive values are heights,
+and negative values are depths. 
+
+See [web page](https://ameriflux.lbl.gov/data/measurement-height/) for details. 
+
+```{r results = "asis"}
+# obtain the latest measurement height information
+var_info <- amf_var_info()
+
+# subset the variable by target Site ID
+var_info <- var_info[var_info$Site_ID %in% final_list, ]
+#pander::pandoc.table(var_info[c(1:10), ])
+```
+
+# BADM data product
+## Download and Import BADM data
+
+Biological, Ancillary, Disturbance, and Metadata (BADM) are non-continuous 
+information that describe and complement continuous flux and meteorological data 
+(e.g., BASE data product). BADM include general site description, metadata about
+the sensors and their setup, maintenance and disturbance events, and biological 
+and ecological data that characterize a site. 
+
+See [link](https://ameriflux.lbl.gov/data/badm/badm-basics/) for details.
+
+The following downloads a single file containing all AmeriFlux sites' metadata 
+(i.e., BADM data product) for sites under the CC-BY-4.0 data use policy. 
+
+The downloaded file is a Excel file saved to tempdir(). Similarly, the 
+amf_download_bif() also returns the file path to the downloaded file, which can 
+be used later to read the file into R.
+
+```{r eval = FALSE}
+## When running, replace user_id and user_email with a real AmeriFlux account
+floc1 <- amf_download_bif(
+  user_id = Sys.getenv("MY_USER"), ## replace with your user ID
+  user_email = Sys.getenv("MY_EMAIL"), ## replace with your email
+  data_policy = "CCBY4.0",
+  agree_policy = TRUE,
+  intended_use = "other",
+  intended_use_text = "amerifluxr package demonstration",
+  out_dir = tempdir(),
+  verbose = TRUE,
+  site_w_data = TRUE
+)
+
+print(floc1)
+```
+
+The amf_read_bif() can be used to import the BADM data file. It returns a data 
+frame for all available sites, and can subset using the "SITE_ID" column. 
+
+```{r results = "asis"}
+# read the BADM BIF file, using an example data file
+bif <- amf_read_bif(file = floc1)
+
+# subset by target Site ID
+bif <- bif[bif$SITE_ID %in% final_list, ]
+#pander::pandoc.table(bif[c(1:15), ])
+
+# get a list of all BADM variable groups and variables
+unique(bif$VARIABLE_GROUP)
+length(unique(bif$VARIABLE))
+
+```
+
+As shown above, BADM data contain information from a variety of variable groups 
+(i.e., GRP\_\{BADM_GROUPS\}). Browse the definitions of all available variable 
+groups [here](https://ameriflux.lbl.gov/data/badm/badm-standards/).  
+
+To get the BADM data for a certain variable group, use amf_extract_badm(). 
+The function also renders the data format (i.e., display variables by columns)
+for human readability.
+
+```{r results = "asis"}
+# extract the HEIGHTC (canopy height) group
+bif_hc <- amf_extract_badm(bif_data = bif, select_group = "GRP_HEIGHTC")
+#pander::pandoc.table(bif_hc)
+```
+
+Note: amf_extract_badm() returns all columns in characters. Certain groups of 
+BADM variables contain columns of timestamps (i.e., ISO format) and data values, 
+and need to be converted before further use.     
+
+```{r fig.width = 7}
+# convert HEIGHTC_DATE to POSIXlt
+bif_hc$TIMESTAMP <- strptime(bif_hc$HEIGHTC_DATE, format = "%Y%m%d", tz = "GMT")
+
+# convert HEIGHTC column to numeric
+bif_hc$HEIGHTC <- as.numeric(bif_hc$HEIGHTC)
+
+# plot time series of canopy height
+plot(bif_hc$TIMESTAMP[bif_hc$SITE_ID == "US-ARM"],
+     bif_hc$HEIGHTC[bif_hc$SITE_ID == "US-ARM"], 
+     xlab = "TIMESTAMP",
+     ylab = "canopy height (m)")
+
+```
+
+Last, the contacts of the site members and data DOI can be obtained from the 
+BADM. The AmeriFlux [data policy](https://ameriflux.lbl.gov/data/data-policy/) 
+requires proper attribution (e.g., data DOI). 
+
+In some case, for example, using data shared under Legacy Data Policy for 
+publication, data users are required to contact data contributors directly, so 
+that they have the opportunity to contribute substantively and become a co-author. 
+
+```{r results = "asis"}
+# get a list of contacts
+bif_contact <- amf_extract_badm(bif_data = bif, select_group = "GRP_TEAM_MEMBER")
+#pander::pandoc.table(bif_contact[c(1:3), ])
+
+# get data DOI
+bif_doi <- amf_extract_badm(bif_data = bif, select_group = "GRP_DOI")
+#pander::pandoc.table(bif_doi[c(1:3), ])
+```
+
